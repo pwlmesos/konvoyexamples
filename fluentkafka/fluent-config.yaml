@@ -1,0 +1,206 @@
+apiVersion: v1
+data:
+  custom_parsers.conf: |
+    [PARSER]
+        Name kubernetes-audit
+        Format json
+        Time_Keep On
+        Time_Key requestReceivedTimestamp
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush 1
+        Daemon Off
+        Log_Level error
+        Parsers_File parsers.conf
+        Parsers_File custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+
+    [INPUT]
+        Name tail
+        Alias kubernetes_audit
+        Path /var/log/kubernetes/audit/*.log
+        Parser kubernetes-audit
+        DB /tail-db/audit.db
+        Tag audit.*
+        Refresh_Interval 10
+        Rotate_Wait 5
+        Mem_Buf_Limit 135MB
+        Buffer_Chunk_Size 5MB
+        Buffer_Max_Size 20MB
+        Skip_Long_Lines Off
+    [INPUT]
+        Name tail
+        Alias kubernetes_cluster
+        Path /var/log/containers/*.log
+        Parser cri
+        DB /tail-db/kube.db
+        Tag kube.*
+        Refresh_Interval 60
+        Rotate_Wait 5
+        Mem_Buf_Limit 5MB
+        Skip_Long_Lines On
+    [INPUT]
+        Name systemd
+        Alias kubernetes_host
+        DB /tail-db/journal.db
+        Tag host.*
+        Max_Entries 1000
+        Read_From_Tail On
+        Strip_Underscores On
+    [INPUT]
+        Name kmsg
+        Alias kubernetes_host_kernel
+        Tag kernel
+    [INPUT]
+        Name              tail
+        Alias             team1
+        Tag               kube.team1.*
+        Path              /var/log/containers/*team1*.log
+        Parser            cri
+        DB                /tail-db/kube.db
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   Off
+        Refresh_Interval  10
+    [INPUT]
+        Name              tail
+        Alias             team2
+        Tag               kube.team2.*
+        Path              /var/log/containers/*team2*.log
+        Parser            cri
+        DB                /tail-db/kube.db
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   Off
+        Refresh_Interval  10
+
+    [FILTER]
+        Name record_modifier
+        Match audit.*
+        Record host ${FLUENT_BIT_NODE_NAME}
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Merge_Log_Key log_processed
+        Keep_Log Off
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+    [FILTER]
+        Name record_modifier
+        Match kernel
+        Record host ${FLUENT_BIT_NODE_NAME}
+    # We are adding the following filters here to have the workaround for
+    # labels kubernetes.label.app=foobar.
+    # Elasticsearch cannot accept single strings and beneath its new objects,
+    # so it will reject all new entries when there is any kubernetes.label.app=foobar
+    # entry already present. So what we do is that we remap / modify the kubernetes.label.app
+    # to be kubernetes.label.app.kubernetes.io/name.
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        Operation           lift
+        Nested_under        kubernetes
+        Add_prefix          kubernetes_
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        Operation           lift
+        Nested_under        kubernetes_labels
+        Add_prefix          kubernetes_labels_
+    [FILTER]
+        Name                modify
+        Match               kube.*
+        Hard_rename         kubernetes_labels_app kubernetes_labels_app.kubernetes.io/name
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        Operation           nest
+        Wildcard            kubernetes_labels_*
+        Nest_under          kubernetes.labels
+        Remove_prefix       kubernetes_labels_
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        Operation           nest
+        Wildcard            kubernetes_*
+        Nest_under          kubernetes
+        Remove_prefix       kubernetes_
+    [FILTER]
+        Name                modify
+        Match               kube.*
+        Remove_wildcard     kubernetes_
+
+    [OUTPUT]
+        Name es
+        Alias kubernetes_audit
+        Match audit.*
+        Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+        Port 9200
+        Time_Key @ts
+        Logstash_Format On
+        Logstash_Prefix kubernetes_audit
+        # A small fraction of audit logs will be rejected by Elasticsearch because values may have an inconsistent type.
+        # We set a low retry limit here in order to prevent fluent-bit from backing up while it repeatedly retries flushing these logs.
+        # See https://github.com/uken/fluent-plugin-elasticsearch#random-400---rejected-by-elasticsearch-is-occured-why.
+        Retry_Limit 1
+        Buffer_Size 512KB
+        # Audit logs may include resource labels, which may include dots. We replace them with underscores to
+        # prevent conflicts that will cause Elasticsearch to reject logs.
+        Replace_Dots On
+    [OUTPUT]
+        Name es
+        Alias kubernetes_cluster
+        Match kube.*
+        Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+        Port 9200
+        Time_Key @ts
+        Logstash_Format On
+        Logstash_Prefix kubernetes_cluster
+        Retry_Limit 10
+        Buffer_Size 512KB
+    [OUTPUT]
+        Name es
+        Alias kubernetes_host
+        Match host.*
+        Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+        Port 9200
+        Time_Key @ts
+        Logstash_Format On
+        Logstash_Prefix kubernetes_host
+        Retry_Limit 10
+        Buffer_Size 512KB
+    [OUTPUT]
+        Name es
+        Alias kubernetes_host_kernel
+        Match kernel
+        Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+        Port 9200
+        Time_Key @ts
+        Logstash_Format On
+        Logstash_Prefix kubernetes_host_kernel
+        Retry_Limit 10
+        Buffer_Size 512KB
+
+    [OUTPUT]
+        Name        kafka
+        Match       *
+        Brokers     192.168.120.69:9092,192.168.238.174:9092,192.168.28.106:9092
+        Topics      logs
+kind: ConfigMap
+metadata:
+  annotations:
+    meta.helm.sh/release-name: fluentbit-kubeaddons
+    meta.helm.sh/release-namespace: kubeaddons
+  creationTimestamp: "2021-09-27T14:49:05Z"
+  labels:
+    app.kubernetes.io/instance: fluentbit-kubeaddons
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/version: 1.6.8
+    helm.sh/chart: fluent-bit-0.7.13
+  name: fluentbit-kubeaddons-fluent-bit
+  namespace: kubeaddons
+  resourceVersion: "90542"
+  uid: 5aae5778-1c09-4167-8a00-f888962fc767

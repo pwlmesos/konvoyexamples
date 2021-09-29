@@ -1,0 +1,299 @@
+kind: ClusterConfiguration
+apiVersion: konvoy.mesosphere.io/v1beta2
+metadata:
+  name: <NAME_OF_YOUR_CLUSTER>
+  creationTimestamp: "2021-07-07T00:35:47Z"
+spec:
+  ntp:
+    autoConfigure: true     # Set to false for on prem custom timekeeping
+  #imageRegistries:
+  #  - server: https://registry-1.docker.io    # NEXUS repo
+  #    username: "<username>"
+  #    password: "<password>"
+  #    default: true
+  autoProvisioning:
+    disabled: false
+  kubernetes:
+    version: 1.20.6
+    networking:
+      podSubnet: 192.168.0.0/16
+      serviceSubnet: 10.0.0.0/18
+      iptables:
+        addDefaultRules: false
+      #httpProxy: "http://proxy.company.com:3128"
+      #httpsProxy: "http://proxy.company.com:3128"
+      #noProxy: [ "172.0.0.0/16", ".intra.net" ]
+    cloudProvider:
+      provider: aws
+    admissionPlugins:
+      enabled:
+        - AlwaysPullImages
+        - NodeRestriction
+    controlPlane:
+      certificate:
+        subjectAlternativeNames:
+        -  cluster.plogankonvoy.com
+  containerNetworking:
+    calico:
+      version: v3.17.3
+      encapsulation: ipip
+      mtu: 1480
+  containerRuntime:
+    containerd:
+      version: 1.4.6
+  osPackages:
+    enableAdditionalRepositories: true
+  nodePools:
+    - name: worker
+  addons:
+    - configRepository: https://github.com/mesosphere/kubernetes-base-addons
+      configVersion: stable-1.20-4.1.0
+      addonsList:
+        - name: ambassador # is currently in Experimental status. More information: https://docs.d2iq.com/dkp/konvoy/latest/version-policy/#experimental-status
+          enabled: false
+        - name: awsebscsiprovisioner
+          enabled: true
+        - name: awsebsprovisioner
+          enabled: false
+          values: |
+            storageclass:
+              isDefault: false
+        - name: cert-manager
+          enabled: true
+        - name: dashboard
+          enabled: true
+        - name: defaultstorageclass-protection
+          enabled: true
+        - name: dex
+          enabled: true
+          values: |
+            config:
+              connectors:
+              - type: oidc
+                id: oidc
+                name: Okta
+                config:
+                  issuer: "https://dev-22258423.okta.com"
+                  clientSecretRef:
+                    name: okta-client-secret
+                  redirectURI: "https://cluster.plogankonvoy.com/dex/callback"
+                  userIDKey: email
+                  userNameKey: email         
+              # staticPasswords:
+              # - email: plogan
+              #   hash: $2y$10$PGa4mKBUX7cnqHnDe3Rdt.sjFYXU.X56vhiYSPQxygmbJNzovv5lG   
+        - name: dex-k8s-authenticator
+          enabled: true
+          values: |
+            caCerts:
+              enabled: true
+              caSecretName: custom-cert
+        - name: elasticsearch
+          enabled: true
+          values: |-
+            ---
+            cluster:
+              xpackEnable: true
+            client:
+              replicas: 1
+              resources:
+                limits:
+                  cpu: 250m
+                  memory: 1800Mi
+                requests:
+                  cpu: 100m
+                  memory: 1024Mi
+            master:
+              replicas: 2
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 1500Mi
+                requests:
+                  cpu: 50m
+                  memory: 1024Mi 
+            data:
+              replicas: 1  
+              resources:
+                limits:
+                  cpu: 800m
+                  memory: 4196Mi
+                requests:
+                  cpu: 500m
+                  memory: 3048Mi
+              persistence:
+                size: 10Gi
+        - name: elasticsearch-curator
+          enabled: true
+        - name: elasticsearchexporter
+          enabled: true
+        - name: external-dns
+          enabled: true
+          values: |
+          aws:
+              region: us-west-2
+              preferCNAME: true
+              zoneType: "public"
+            policy: sync
+            txtOwnerId: xxxxxxxx
+            domainFilters:
+            - <yourdomain>
+        - name: flagger
+          enabled: false
+        - name: fluentbit
+          enabled: true
+          values: |
+            config:
+              outputs: |
+                [OUTPUT]
+                    Name es
+                    Alias kubernetes_audit
+                    Match audit.*
+                    Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+                    Port 9200
+                    Time_Key @ts
+                    Logstash_Format On
+                    Logstash_Prefix kubernetes_audit
+                    # A small fraction of audit logs will be rejected by Elasticsearch because values may have an inconsistent type.
+                    # We set a low retry limit here in order to prevent fluent-bit from backing up while it repeatedly retries flushing these logs.
+                    # See https://github.com/uken/fluent-plugin-elasticsearch#random-400---rejected-by-elasticsearch-is-occured-why.
+                    Retry_Limit 1
+                    Buffer_Size 512KB
+                    # Audit logs may include resource labels, which may include dots. We replace them with underscores to
+                    # prevent conflicts that will cause Elasticsearch to reject logs.
+                    Replace_Dots On
+                [OUTPUT]
+                    Name es
+                    Alias kubernetes_cluster
+                    Match kube.*
+                    Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+                    Port 9200
+                    Time_Key @ts
+                    Logstash_Format On
+                    Logstash_Prefix kubernetes_cluster
+                    Retry_Limit 10
+                    Buffer_Size 512KB
+                [OUTPUT]
+                    Name es
+                    Alias kubernetes_host
+                    Match host.*
+                    Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+                    Port 9200
+                    Time_Key @ts
+                    Logstash_Format On
+                    Logstash_Prefix kubernetes_host
+                    Retry_Limit 10
+                    Buffer_Size 512KB
+                [OUTPUT]
+                    Name es
+                    Alias kubernetes_host_kernel
+                    Match kernel
+                    Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+                    Port 9200
+                    Time_Key @ts
+                    Logstash_Format On
+                    Logstash_Prefix kubernetes_host_kernel
+                    Retry_Limit 10
+                    Buffer_Size 512KB
+                [OUTPUT]
+                    Name es
+                    Match kube.team1.*
+                    Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+                    Port 9200
+                    Logstash_Format On
+                    Logstash_Prefix team1
+                    Time_Key @ts
+                    tls Off
+                    Retry_Limit False
+                [OUTPUT]
+                    Name es
+                    Match kube.team2.*
+                    Host elasticsearch-kubeaddons-client.kubeaddons.svc.cluster.local.
+                    Port 9200
+                    Logstash_Format On
+                    Logstash_Prefix team2
+                    Time_Key @ts
+                    tls Off
+                    Retry_Limit False
+                [OUTPUT]
+                    Name        kafka
+                    Match       *
+                    Brokers     192.168.120.69:9092,192.168.238.174:9092,192.168.28.106:9092
+                    Topics      second
+        - name: gatekeeper
+          enabled: true
+        - name: istio # is currently in Experimental status. More information: https://docs.d2iq.com/dkp/konvoy/latest/version-policy/#experimental-status
+          enabled: true
+        - name: jaeger # is currently in Experimental status. More information: https://docs.d2iq.com/dkp/konvoy/latest/version-policy/#experimental-status
+          enabled: false
+        - name: kiali # is currently in Experimental status. More information: https://docs.d2iq.com/dkp/konvoy/latest/version-policy/#experimental-status
+          enabled: false
+        - name: kibana
+          enabled: true
+        - name: konvoyconfig
+          enabled: true
+          values: |
+            config:
+              clusterHostname: cluster.plogankonvoy.com
+              caSecretName: custom-cert
+        - name: kube-oidc-proxy
+          enabled: true
+          values: |
+            oidc:
+              caSecretName: custom-cert          
+        - name: localvolumeprovisioner
+          enabled: false
+          values: |
+            # Multiple storage classes can be defined here. This allows to, e.g.,
+            # distinguish between different disk types.
+            # For each entry a storage class '$name' and
+            # a host folder '/mnt/$dirName' will be created. Volumes mounted to this
+            # folder are made available in the storage class.
+            storageclasses:
+              - name: localvolumeprovisioner
+                dirName: disks
+                isDefault: false
+                reclaimPolicy: Delete
+                volumeBindingMode: WaitForFirstConsumer
+        - name: nvidia
+          enabled: false
+        - name: opsportal
+          enabled: true
+        - name: prometheus
+          enabled: true
+
+        - name: prometheusadapter
+          enabled: true
+        - name: reloader
+          enabled: true
+        - name: traefik
+          enabled: true
+          values: |
+            service:
+              annotations:
+                external-dns.alpha.kubernetes.io/hostname: cluster.plogankonvoy.com
+            ssl:
+              caSecretName: custom-cert
+        - name: traefik-forward-auth
+          enabled: true
+          values: |
+            traefikForwardAuth:
+              caSecretName: custom-cert         
+        - name: velero
+          enabled: true
+    - configRepository: https://github.com/mesosphere/kubeaddons-dispatch
+      configVersion: stable-1.20-1.4.5
+      addonsList:
+        - name: dispatch
+          enabled: false
+    - configRepository: https://github.com/mesosphere/kubeaddons-kommander
+      configVersion: stable-1.20-1.4.1
+      addonsList:
+        - name: kommander
+          enabled: true
+    - configRepository: https://github.com/pwlmesos/plo-addons
+      configVersion: main
+      addonsList:
+        - name: awsefscsiprovisioner
+          enabled: false 
+  version: v1.8.1
